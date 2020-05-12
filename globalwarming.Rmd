@@ -1,0 +1,256 @@
+---
+title: "3d Bunny"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: 4
+    toc_float: true
+  word_document:
+    toc: yes
+    toc_depth: '4'
+---
+  
+  
+```{r load libs, message=FALSE, warning=FALSE, echo=FALSE}
+library( dplyr )
+library(ggplot2)  # For plotting
+library(patchwork)  # For plotting
+
+knitr::opts_chunk$set(fig.width=6, fig.height=4, echo=T, warning=FALSE, message=FALSE)
+```
+
+Inspired by [Custom 3D engine in Matplotlib](https://matplotlib.org/matplotblog/posts/custom-3d-engine/)
+
+# Loading the bunny
+
+First things first, we need to load our model.
+We'll use a [simplified version](https://matplotlib.org/matplotblog/posts/custom-3d-engine/bunny.obj) of the [Stanford bunny](https://en.wikipedia.org/wiki/Stanford_bunny). 
+The file uses the [wavefront format](https://en.wikipedia.org/wiki/Wavefront_.obj_file) which is one of the simplest format,
+so let's make a very simple (but error-prone) loader that will just do the job for this post (and this model):
+
+```{r}
+
+bunny <- readr::read_delim('bunny.obj', col_names=F, comment = '#', delim = ' ') %>% select( type=1, x=2, y=3, z=4 ) 
+
+```
+
+```{r}
+
+V <- bunny %>% filter( type == 'v' ) %>% mutate( vertex=seq(nrow(.)) ) %>% select(-type) %>%
+  mutate( x= x - (max(x) + min(x)) / 2, y= y - (max(y) + min(y)) / 2, z= z - (max(z) + min(z)) / 2,
+          x = x / (max(x) - min(x)), y = y / (max(y) - min(y)), z = z / (max(z) - min(z)))
+
+V %>% ggplot( aes(x=x, y=y) ) + geom_point() + coord_fixed(ratio=1)
+
+
+```
+
+```{r}
+
+Triangles <- bunny %>% filter( type == 'f' ) %>% select(v1=x, v2=y, v3=z) %>% 
+  mutate( t1 = seq(nrow(.))) %>% 
+  tidyr::pivot_longer( -t1, values_to = 'vertex' ) %>% 
+  mutate( vertex = as.integer(vertex) )
+
+Triangles %>% 
+  left_join( V, by='vertex' ) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + geom_polygon(fill='white', color='black', size=0.2) + coord_fixed(ratio=1)
+
+````
+
+# Perspective Projection
+
+```{r}
+
+frustum <- function(left, right, bottom, top, znear, zfar){
+    M <- matrix( data=0, nrow=4, ncol=4)
+    M[1, 1] <- +2.0 * znear / (right - left)
+    M[2, 2] <- +2.0 * znear / (top - bottom)
+    M[3, 3] <- -(zfar + znear) / (zfar - znear)
+    M[1, 3] <- (right + left) / (right - left)
+    M[3, 2] <- (top + bottom) / (top - bottom)
+    M[3, 4] <- -2.0 * znear * zfar / (zfar - znear)
+    M[4, 3] <- -1.0
+    M
+}
+
+perspective <- function(fovy, aspect, znear, zfar){
+    h <- tan(fovy * pi / 360 ) * znear
+    w <- h * aspect
+    frustum(-w, w, -h, h, znear, zfar)
+}
+
+V2 <- V %>% mutate( x = x, y=y, z=z-3.5 ) %>%
+  ( function(vertices) as.matrix( cbind( vertices[, c(1,2,3)] , 1 ) )) %*% t( perspective(25,1,1,100)) %>% 
+  as_tibble() %>% 
+  select( x=V1, y=V2, z=V3, w=V4) %>% 
+  mutate( vertex=seq(nrow(.)), x=x/w, y=y/w, z=z/w, w=1)
+
+Triangles %>% 
+  left_join( V2, by='vertex' ) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + geom_polygon(fill='white', color='black', size=0.2) + coord_fixed(ratio=1)
+
+```
+
+
+
+```{r}
+
+translate <- function(x, y, z){
+    matrix(c( 1, 0, 0, x,
+              0, 1, 0, y,
+              0, 0, 1, z,
+              0, 0, 0, 1), 
+        nrow=4, ncol=4, byrow = T)
+}
+
+xrotate <- function(theta){
+    tt <- pi * theta / 180
+    cs <- cos(tt)
+    ss <- sin(tt)
+    
+    matrix(c( 1, 0, 0, 0,
+              0, cs, -ss, 0,
+              0, ss,  cs, 0,
+              0, 0,  0, 1), 
+        nrow=4, ncol=4, byrow = T)
+}
+
+yrotate <- function(theta){
+    tt <- pi * theta / 180
+    cs <- cos(tt)
+    ss <- sin(tt)
+    
+    matrix(c(  cs, 0, ss, 0,
+               0, 1, 0, 0,
+              -ss, 0, cs, 0,
+               0, 0, 0, 1), 
+        nrow=4, ncol=4, byrow = T)
+}
+
+```
+
+
+```{r}
+
+model <- xrotate(20) %*% yrotate(45)
+view  <- translate(0,0,-3.5)
+proj  <- perspective(25, 1, 1, 100)
+MVP   <- proj %*% view %*% model
+
+MVP
+```
+
+
+
+
+```{r}
+
+V3 <- V %>% mutate( x = x, y=y, z=z-3.5 ) %>%
+  ( function(vertices) as.matrix( cbind( vertices[, c(1,2,3)] , 1 ) )) %*% t( MVP ) %>% 
+  as_tibble() %>% 
+  select( x=V1, y=V2, z=V3, w=V4) %>% 
+  mutate( vertex=seq(nrow(.)), x=x/w, y=y/w, z=z/w, w=1)
+
+Triangles %>% 
+  left_join( V3, by='vertex' ) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + geom_polygon(fill='white', color='black', size=0.2) + coord_fixed(ratio=1)
+
+```
+
+
+
+
+```{r}
+
+p25 <- Triangles %>% 
+  left_join( V %>% mutate( x = x, y=y, z=z-3.5 ) %>%
+  ( function(vertices) as.matrix( cbind( vertices[, c(1,2,3)] , 1 ) )) %*% t( perspective(25, 1, 1, 100) %*% view %*% model ) %>% 
+  as_tibble() %>% 
+  select( x=V1, y=V2, z=V3, w=V4) %>% 
+  mutate( vertex=seq(nrow(.)), x=x/w, y=y/w, z=z/w, w=1), by='vertex' ) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + geom_polygon(fill='white', color='black', size=0.2) + coord_fixed(ratio=1) + labs(x=NULL, y=NULL)
+
+
+p40 <- Triangles %>% 
+  left_join( V %>% mutate( x = x, y=y, z=z-3.5 ) %>%
+  ( function(vertices) as.matrix( cbind( vertices[, c(1,2,3)] , 1 ) )) %*% t( perspective(40, 1, 1, 100) %*% view %*% model ) %>% 
+  as_tibble() %>% 
+  select( x=V1, y=V2, z=V3, w=V4) %>% 
+  mutate( vertex=seq(nrow(.)), x=x/w, y=y/w, z=z/w, w=1), by='vertex' ) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + geom_polygon(fill='white', color='black', size=0.2) + coord_fixed(ratio=1) + labs(x=NULL, y=NULL)
+
+
+p65 <- Triangles %>% 
+  left_join( V %>% mutate( x = x, y=y, z=z-3.5 ) %>%
+  ( function(vertices) as.matrix( cbind( vertices[, c(1,2,3)] , 1 ) )) %*% t( perspective(65, 1, 1, 100) %*% view %*% model ) %>% 
+  as_tibble() %>% 
+  select( x=V1, y=V2, z=V3, w=V4) %>% 
+  mutate( vertex=seq(nrow(.)), x=x/w, y=y/w, z=z/w, w=1), by='vertex' ) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + geom_polygon(fill='white', color='black', size=0.2) + coord_fixed(ratio=1) + labs(x=NULL, y=NULL)
+
+
+p80 <- Triangles %>% 
+  left_join( V %>% mutate( x = x, y=y, z=z-3.5 ) %>%
+  ( function(vertices) as.matrix( cbind( vertices[, c(1,2,3)] , 1 ) )) %*% t( perspective(80, 1, 1, 100) %*% view %*% model ) %>% 
+  as_tibble() %>% 
+  select( x=V1, y=V2, z=V3, w=V4) %>% 
+  mutate( vertex=seq(nrow(.)), x=x/w, y=y/w, z=z/w, w=1), by='vertex' ) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + geom_polygon(fill='white', color='black', size=0.2) + coord_fixed(ratio=1) + labs(x=NULL, y=NULL)
+
+p25 + p40 + p65 + p80
+
+```
+
+```{r}
+
+
+model <- xrotate(-30) %*% yrotate(180)
+view  <- translate(0,0,-3.5)
+proj  <- perspective(45, 1, 1, 100)
+MVP   <- proj %*% view %*% model
+
+
+V3s <- V %>% mutate( x = x, y=y, z=z+3.5 ) %>%
+  ( function(vertices) as.matrix( cbind( vertices[, c(1,2,3)] , 1 ) )) %*% t( MVP ) %>% 
+  as_tibble() %>% 
+  select( x=V1, y=V2, z=V3, w=V4) %>% 
+  mutate( vertex=seq(nrow(.)), x=x/w, y=y/w, z=z/w, w=1)
+
+T3s <- Triangles %>% left_join( V3s, by='vertex' ) 
+torder <- T3s %>% group_by(t1) %>% summarize(depth=mean(z))
+
+T3s %>% left_join(torder, by='t1') %>% arrange(depth) %>% mutate( t1=factor(t1, levels=unique( t1 ) )) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + 
+  geom_polygon(fill='lightgrey', color='darkgrey', size=0.2) + coord_fixed(ratio=1) + guides(fill='none') + 
+  labs(x=NULL, y=NULL)
+
+```
+
+
+```{r}
+
+
+model <- xrotate(-30) %*% yrotate(180)
+view  <- translate(0,0,-3.5)
+proj  <- perspective(45, 1, 1, 100)
+MVP   <- proj %*% view %*% model
+
+
+V3s <- V %>% mutate( x = x, y=y, z=z+3.5 ) %>%
+  ( function(vertices) as.matrix( cbind( vertices[, c(1,2,3)] , 1 ) )) %*% t( MVP ) %>% 
+  as_tibble() %>% 
+  select( x=V1, y=V2, z=V3, w=V4) %>% 
+  mutate( vertex=seq(nrow(.)), x=x/w, y=y/w, z=z/w, w=1)
+
+T3s <- Triangles %>% left_join( V3s, by='vertex' ) 
+torder <- T3s %>% group_by(t1) %>% summarize(depth=mean(z))
+
+T3s %>% left_join(torder, by='t1') %>% arrange(depth) %>% mutate( t1=factor(t1, levels=unique( t1 ) )) %>% 
+  ggplot( aes( x=x,y=y, group=t1 )) + 
+  geom_polygon(aes(fill=depth), color='darkgrey', size=0.2) + coord_fixed(ratio=1) + guides(fill='none') + 
+  scale_fill_viridis_c( option='magma' ) + labs(x=NULL, y=NULL)
+
+```
+
